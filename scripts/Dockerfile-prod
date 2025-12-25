@@ -1,0 +1,46 @@
+FROM python:3.9-slim
+
+# Рабочая директория: все команды будут выполняться в /app
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+# Установка Python зависимостей из requirements.txt
+# Флаг --no-cache-dir уменьшает размер образа
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install gunicorn
+
+COPY . .
+
+# Настройка переменных окружения:
+# PYTHONPATH - путь для импорта модулей Python
+# PYTHONUNBUFFERED - немедленный вывод логов
+ENV PYTHONPATH=/app/src
+ENV PYTHONUNBUFFERED=1
+
+# Сбор статических файлов Django (CSS, JS, изображения)
+RUN python manage.py collectstatic --noinput
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Объявление порта, который будет использоваться приложением
+# Соответствует порту, указанному в настройках Django
+EXPOSE 8000
+
+# Используется Gunicorn как production-сервер
+# --bind 0.0.0.0:8000 - привязка ко всем интерфейсам на порту 8000
+# --workers 3 - количество worker-процессов
+CMD ["gunicorn", "sql_replacer.wsgi:application", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "3", \
+     "--worker-class", "sync", \
+     "--timeout", "120", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-"]

@@ -1,0 +1,195 @@
+{% extends 'replacer_app/base.html' %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <form method="post" id="sqlForm">
+            {% csrf_token %}
+
+            <div class="mb-3">
+                {{ form.sql_code.label_tag }}
+                {{ form.sql_code }}
+                <div class="form-text">Введите SQL запрос для обработки</div>
+            </div>
+
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        {{ form.strings_to_replace.label_tag }}
+                        {{ form.strings_to_replace }}
+                        <div class="form-text">Строки для замены (по одной на строку)</div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="mb-3">
+                        {{ form.replacement_strings.label_tag }}
+                        {{ form.replacement_strings }}
+                        <div class="form-text">Новые строки (по одной на строку)</div>
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit" class="btn btn-primary" id="submitBtn">
+                Выполнить замену
+            </button>
+
+            {% if result %}
+            <button type="button" class="btn btn-success ms-2" id="copyBtn">
+                Скопировать результат
+            </button>
+            {% endif %}
+        </form>
+
+        {% if error %}
+            <div class="alert alert-danger mt-4" role="alert">
+                <strong>Ошибка:</strong> {{ error }}
+            </div>
+        {% endif %}
+
+        {% if original_sql and result %}
+            <div class="row mt-4">
+                <div class="col-md-6">
+                    <h4>Исходный SQL:</h4>
+                    <div class="sql-result">{{ original_sql }}</div>
+                </div>
+                <div class="col-md-6">
+                    <h4>Результат:</h4>
+                    <div class="sql-result" id="resultOutput">{{ result }}</div>
+                </div>
+            </div>
+        {% elif result %}
+            <div class="mt-4">
+                <h4>Результат:</h4>
+                <div class="sql-result" id="resultOutput">{{ result }}</div>
+            </div>
+        {% endif %}
+
+        <!-- Сообщение об успешном копировании -->
+        <div class="alert alert-success mt-3 d-none" id="copySuccessAlert">
+            Результат скопирован в буфер обмена!
+        </div>
+    </div>
+</div>
+
+<div class="row mt-5">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5>Как использовать:</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>Введите SQL код в первое поле</li>
+                    <li>В левом поле введите строки для замены (каждая строка на новой линии)</li>
+                    <li>В правом поле введите строки замены (каждая строка на новой линии)</li>
+                    <li>Нажмите "Выполнить замену" - результат автоматически скопируется</li>
+                    <li>Или используйте кнопку "Скопировать результат" для ручного копирования</li>
+                </ol>
+                <p class="mb-0">
+                    <strong>Особенности замены:</strong>
+                    <ul>
+                        <li><strong>Самые длинные строки заменяются первыми</strong></li>
+                        <li><strong>Защита от повторных замен</strong> - уже замененные участки не изменяются повторно</li>
+                        <li><strong>Сохранение исходного форматирования</strong> - пробелы, переносы остаются как в оригинале</li>
+                        <li>Автоматическое копирование результата после замены</li>
+                    </ul>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const resultOutput = document.getElementById('resultOutput');
+    const copyBtn = document.getElementById('copyBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const copySuccessAlert = document.getElementById('copySuccessAlert');
+    const sqlForm = document.getElementById('sqlForm');
+
+    // Функция для копирования текста
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(function() {
+            // Показываем сообщение об успехе
+            copySuccessAlert.classList.remove('d-none');
+            setTimeout(function() {
+                copySuccessAlert.classList.add('d-none');
+            }, 3000);
+        }).catch(function(err) {
+            console.error('Ошибка при копировании: ', err);
+            // Fallback для старых браузеров
+            fallbackCopyTextToClipboard(text);
+        });
+    }
+
+    // Fallback метод для копирования
+    function fallbackCopyTextToClipboard(text) {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-999999px";
+        textArea.style.top = "-999999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+
+        try {
+            document.execCommand('copy');
+            copySuccessAlert.classList.remove('d-none');
+            setTimeout(function() {
+                copySuccessAlert.classList.add('d-none');
+            }, 3000);
+        } catch (err) {
+            console.error('Fallback: Ошибка при копировании текста: ', err);
+        }
+
+        document.body.removeChild(textArea);
+    }
+
+    // Обработчик для кнопки "Скопировать результат"
+    if (copyBtn) {
+        copyBtn.addEventListener('click', function() {
+            if (resultOutput) {
+                const textToCopy = resultOutput.textContent || resultOutput.innerText;
+                copyToClipboard(textToCopy);
+            }
+        });
+    }
+
+    // Автоматическое копирование после отправки формы (если есть результат)
+    if (sqlForm && submitBtn) {
+        sqlForm.addEventListener('submit', function() {
+            // Сохраняем состояние формы перед отправкой
+            localStorage.setItem('shouldAutoCopy', 'true');
+        });
+    }
+
+    // Автоматическое копирование при загрузке страницы (если был submit)
+    window.addEventListener('load', function() {
+        const shouldAutoCopy = localStorage.getItem('shouldAutoCopy');
+        const resultText = resultOutput ? (resultOutput.textContent || resultOutput.innerText) : null;
+
+        if (shouldAutoCopy === 'true' && resultText && resultText.trim()) {
+            // Небольшая задержка чтобы пользователь увидел результат
+            setTimeout(function() {
+                copyToClipboard(resultText);
+                localStorage.removeItem('shouldAutoCopy'); // Очищаем флаг
+            }, 500);
+        }
+    });
+
+    // Добавляем обработчик для кнопки submit для немедленного копирования (если JS успеет)
+    if (submitBtn) {
+        let formSubmitted = false;
+
+        submitBtn.addEventListener('click', function() {
+            formSubmitted = true;
+            // Устанавливаем таймер для проверки результата после перезагрузки
+            localStorage.setItem('formSubmitted', 'true');
+        });
+    }
+});
+</script>
+{% endblock %}

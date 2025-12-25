@@ -1,0 +1,228 @@
+# Название workflow
+name: CI/CD Pipeline
+
+# Триггеры запуска pipeline
+on:
+  push:
+    branches: [ main, master, try_ci_cd ]
+  pull_request:
+    branches: [ main, master, try_ci_cd ]
+  merge_group:
+
+# Глобальные переменные окружения
+env:
+  DEPLOY_DIR: /app/sql-replacer
+
+
+jobs:
+
+# Job для тестирования
+  test:
+    name: Test on ${{ matrix.os }}
+    # Запуск на операционной системе из матрицы
+    runs-on: ${{ matrix.os }}
+    # Стратегия выполнения с матрицей
+    strategy:
+      # Не прерывать все задачи при падении одной
+      fail-fast: false
+      # Матрица конфигураций для параллельного запуска
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9']
+
+    # Шаги выполнения задания test
+    steps:
+    # Шаг 1: Получение кода из репозитория на runner
+    - name: Checkout code
+      uses: actions/checkout@v4 # официальное действие checkout версии 4 GitHub Actions, клонирующее репозиторий на runner (сервер для выполнения workflow)
+
+    # Шаг 2: Установка Python указанной версии
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        # Кэширование pip пакетов для ускорения
+        cache: 'pip'
+
+    # Шаг 3: Установка зависимостей проекта
+    - name: Install dependencies
+      run: |
+        # Обновление pip до последней версии
+        python -m pip install --upgrade pip
+        # Установка зависимостей из requirements.txt
+        pip install -r requirements.txt
+        # Установка дополнительных пакетов для coverage (покрытие тестов) и BOM (SBOM)
+        pip install coverage cyclonedx-bom
+
+    # Шаг 4: Запуск тестов Django с измерением покрытия кода
+    - name: Run Django tests with coverage
+      run: |
+        # Запуск тестов Django с подробным выводом
+        python manage.py test replacer_app tests --verbosity=2
+        # Запуск тестов с измерением покрытия кода
+        coverage run --source='.' manage.py test replacer_app tests
+        # Вывод отчета о покрытии в консоль
+        coverage report
+        # Генерация XML отчета для Codecov
+        coverage xml
+
+    # Шаг 5: Загрузка отчета о покрытии в Codecov (опционально)
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        # Не завершать CI при ошибке загрузки
+        fail_ci_if_error: false
+
+
+
+
+
+  # Job для деплоя на сервер
+  deploy:
+    # Зависимость: deploy запускается только после успешного test
+    needs: test
+    name: Deploy to Yandex Cloud
+    runs-on: ubuntu-latest
+    # Условие запуска: Только при push в указанные ветки, не при pull request
+    if: github.event_name == 'push' && 
+        (github.ref == 'refs/heads/main' || 
+         github.ref == 'refs/heads/master' || 
+         github.ref == 'refs/heads/try_ci_cd')
+
+    # Шаги выполнения задания deploy
+    steps:
+    # Шаг 1: Получение кода из репозитория
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # Шаг 2: Настройка SSH подключения к серверу
+    - name: Set up SSH
+      run: |
+        # Создание директории для SSH ключей
+        mkdir -p ~/.ssh
+        # Запись приватного SSH ключа из secrets в файл
+        echo "${{ secrets.YC_SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+        # Установка прав доступа для приватного ключа
+        chmod 600 ~/.ssh/id_rsa
+        # Добавление хоста в known_hosts для избежания проверки
+        ssh-keyscan -H ${{ secrets.YC_HOST }} >> ~/.ssh/known_hosts
+
+    # Шаг 3: Подготовка файлов для деплоя
+    - name: Prepare deployment files
+      run: |
+        # Создание временной директории для файлов деплоя
+        mkdir -p deployment
+        # Копирование скриптов и конфигурационных файлов
+        cp scripts/setup-server.sh deployment/
+        cp scripts/docker-compose-production.yml deployment/docker-compose.yml
+        cp scripts/Dockerfile-prod deployment/Dockerfile
+
+    # Шаг 4: Настройка удаленной директории на сервере
+    - name: Setup remote directory
+      run: |
+        # SSH подключение для создания и настройки прав директории деплоя
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+          ${{ secrets.YC_USER }}@${{ secrets.YC_HOST }} \
+          "sudo mkdir -p ${{ env.DEPLOY_DIR }} && sudo chown -R ${{ secrets.YC_USER }}:${{ secrets.YC_USER }} ${{ env.DEPLOY_DIR }}"
+
+    # Шаг 5: Копирование файлов на Yandex Cloud сервер
+    - name: Copy files to Yandex Cloud
+      run: |
+        # Копирование основного кода проекта с исключением ненужных файлов
+        rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='.gitignore' \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          --exclude='db.sqlite3' \
+          ./ ${{ secrets.YC_USER }}@${{ secrets.YC_HOST }}:${{ env.DEPLOY_DIR }}/
+
+        # Копирование подготовленных файлов деплоя
+        rsync -avz -e "ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no" \
+          deployment/ ${{ secrets.YC_USER }}@${{ secrets.YC_HOST }}:${{ env.DEPLOY_DIR }}/deployment/
+
+    # Шаг 6: Запуск скрипта настройки сервера
+    - name: Run server setup
+      run: |
+        # SSH подключение с выполнением многострочного скрипта
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+          ${{ secrets.YC_USER }}@${{ secrets.YC_HOST }} << 'EOF'
+          set -e  # Прекратить выполнение при ошибке
+          
+          echo "Running server setup..."
+          # Даем права на выполнение скрипта
+          chmod +x ${{ env.DEPLOY_DIR }}/deployment/setup-server.sh
+          
+          # Передаем имя пользователя как переменную окружения
+          export SUDO_USER="${{ secrets.YC_USER }}"
+          # Запускаем скрипт настройки с sudo
+          sudo -E ${{ env.DEPLOY_DIR }}/deployment/setup-server.sh
+          
+          # Временное решение для прав Docker socket
+          echo "Temporary Docker socket permission fix..."
+          sudo chmod 666 /var/run/docker.sock || true
+        EOF
+
+    # Шаг 7: Деплой приложения на Yandex Cloud
+    - name: Deploy application on Yandex Cloud
+      run: |
+        # SSH подключение для выполнения деплоя
+        ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no \
+          ${{ secrets.YC_USER }}@${{ secrets.YC_HOST }} << 'EOF'
+          set -e  # Прекратить выполнение при ошибке
+          
+          # Переходим в директорию проекта
+          cd ${{ env.DEPLOY_DIR }}
+          
+          # Проверка прав Docker
+          echo "Checking Docker permissions..."
+          id
+          groups
+          docker ps 2>/dev/null || echo "Using sudo for Docker commands"
+          
+          # Вывод информации о текущей директории
+          echo "Current directory:"
+          pwd
+          ls -la
+          
+          # Копирование файлов деплоя в основную директорию
+          echo "Copying deployment files..."
+          cp -f deployment/Dockerfile .
+          cp -f deployment/docker-compose.yml .
+          
+          # Запуск процесса деплоя
+          echo "Starting deployment..."
+          # Останавливаем существующие контейнеры
+          sudo docker-compose down || true
+          # Собираем образы без кэша
+          sudo docker-compose build --no-cache
+          # Запускаем контейнеры в фоновом режиме
+          sudo docker-compose up -d
+          
+          # Проверка работоспособности приложения
+          echo "Checking application health..."
+          sleep 15  # Ждем запуска приложения
+          # Пробуем получить ответ от приложения
+          if curl -f http://localhost:8000; then
+            echo "Application health check passed!"
+          else
+            # Если проверка не прошла, смотрим логи
+            echo "Health check failed, checking logs..."
+            sudo docker-compose logs
+            exit 1  # Завершаем с ошибкой
+          fi
+          
+          # Успешное завершение деплоя
+          echo "Deployment completed successfully!"
+          echo "Application is running at http://SERVER_IP:8000"
+        EOF
+
+    # Шаг 8: Очистка SSH ключа после деплоя
+    - name: Clean up SSH key
+      run: |
+        # Удаление приватного ключа с runner
+        rm -f ~/.ssh/id_rsa
+        # Удаление временной директории с файлами деплоя
+        rm -rf deployment
