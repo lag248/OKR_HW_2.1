@@ -1,6 +1,11 @@
 # Название workflow
 name: CI/CD Pipeline
 
+# Требуемые параметры: secrets.
+# YC_SSH_PRIVATE_KEY
+# YC_HOST
+# YC_USER
+
 # Триггеры запуска pipeline
 on:
   push:
